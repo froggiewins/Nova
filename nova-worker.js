@@ -21,27 +21,34 @@ function halfTable() {
   return t;
 }
 
-async function fetchWithProgress(url, onProgress) {
+// expectedBytes comes from model.json, because servers that compress the file
+// (like GitHub Pages) report the compressed size, not the real one.
+async function fetchWithProgress(url, expectedBytes, onProgress) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Could not load ${url} (${res.status})`);
-  const total = +res.headers.get("Content-Length") || 0;
-  if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
-  const out = new Uint8Array(total);
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
+  const chunks = [];
   const reader = res.body.getReader();
   let got = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    out.set(value, got);
+    chunks.push(value);
     got += value.length;
-    onProgress(got / total);
+    onProgress(Math.min(1, got / expectedBytes));
   }
+  const out = new Uint8Array(got);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
   return out;
 }
 
 async function load() {
   const meta = await (await fetch("model.json")).json();
-  const bytes = await fetchWithProgress("model.bin", (f) => postMessage({ type: "progress", value: f }));
+  let expected = 0;
+  for (const { shape } of Object.values(meta.tensors)) expected += 2 * shape.reduce((a, b) => a * b, 1);
+  const bytes = await fetchWithProgress("model.bin", expected, (f) => postMessage({ type: "progress", value: f }));
+  if (bytes.byteLength !== expected) throw new Error(`model.bin is ${bytes.byteLength} bytes, expected ${expected}`);
   const half = new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
   const table = halfTable();
   for (const [name, { offset, shape }] of Object.entries(meta.tensors)) {
