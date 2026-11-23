@@ -47,7 +47,8 @@ input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-r
 </div>
 <script>
 const log = document.getElementById('log'), input = document.getElementById('i'), send = document.getElementById('send');
-const worker = new Worker('nova-worker.js');
+const VERSION = 2; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
+const worker = new Worker('nova-worker.js?v=' + VERSION);
 const INTRO = "Hi! I'm Nova, a small model trained from scratch. Ask me about everyday things, animals, countries, science, or how to build web pages in HTML.";
 let busy = false, current = null;
 

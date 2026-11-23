@@ -44,10 +44,11 @@ async function fetchWithProgress(url, expectedBytes, onProgress) {
 }
 
 async function load() {
-  const meta = await (await fetch("model.json")).json();
+  const v = new URL(self.location.href).search; // same ?v= as the page, so new models aren't cached
+  const meta = await (await fetch("model.json" + v)).json();
   let expected = 0;
   for (const { shape } of Object.values(meta.tensors)) expected += 2 * shape.reduce((a, b) => a * b, 1);
-  const bytes = await fetchWithProgress("model.bin", expected, (f) => postMessage({ type: "progress", value: f }));
+  const bytes = await fetchWithProgress("model.bin" + v, expected, (f) => postMessage({ type: "progress", value: f }));
   if (bytes.byteLength !== expected) throw new Error(`model.bin is ${bytes.byteLength} bytes, expected ${expected}`);
   const half = new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
   const table = halfTable();
