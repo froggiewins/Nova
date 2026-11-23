@@ -8,6 +8,7 @@ let P = {};               // weights by name (Float32Array)
 let kCache, vCache;       // per layer: Float32Array(T * E)
 let pos = 0;              // next position in the cache
 let ctx = [];             // tokens currently in the cache
+let meta_threshold = 0;   // surprise level above which Nova says it doesn't understand
 
 // ---------- loading ----------
 function halfTable() {
@@ -59,6 +60,7 @@ async function load() {
     P[name] = a;
   }
   cfg = meta.config; chars = meta.chars;
+  meta_threshold = meta.surprise_threshold || 0;
   stoi = new Map(chars.map((c, i) => [c, i]));
   E = cfg.n_embd; H = cfg.n_head; HD = E / H; L = cfg.n_layer; T = cfg.block_size; V = cfg.vocab_size;
   END_ID = stoi.get(END);
@@ -159,10 +161,28 @@ function sample(logits, temperature, topK) {
   return idx[idx.length - 1];
 }
 
+const CONFUSED = "I'm not sure I understand that. I'm a small model, so I only know about everyday things, " +
+  "animals, countries, science, word meanings and basic HTML. Could you ask it a different way?";
+
+// How unlikely the model found the token `id`, given the logits that predicted it.
+function surpriseOf(logits, id) {
+  let mx = -Infinity; for (let i = 0; i < logits.length; i++) if (logits[i] > mx) mx = logits[i];
+  let s = 0; for (let i = 0; i < logits.length; i++) s += Math.exp(logits[i] - mx);
+  return Math.log(s) + mx - logits[id];
+}
+
 function reply(message, temperature) {
-  const prompt = USER + message.slice(0, 300) + BOT;
-  let logits;
-  for (const ch of prompt) { const id = stoi.get(ch); if (id !== undefined) logits = feed(id); }
+  const startPos = pos, startLen = ctx.length;
+  const msgIds = [...message.slice(0, 300)].map((c) => stoi.get(c)).filter((id) => id !== undefined);
+  let logits = feed(stoi.get(USER)), total = 0, n = 0;
+  for (const id of msgIds) { total += surpriseOf(logits, id); n++; logits = feed(id); }
+  const threshold = meta_threshold;
+  if (threshold && n >= 3 && total / n > threshold) {
+    // Too unfamiliar to answer: forget this message (when the window didn't slide) and say so.
+    if (ctx.length === startLen + 1 + msgIds.length) { pos = startPos; ctx.length = startLen; }
+    return CONFUSED;
+  }
+  logits = feed(stoi.get(BOT));
   let text = "", last = performance.now();
   for (let n = 0; n < 450; n++) {
     const id = sample(logits, temperature, 20);

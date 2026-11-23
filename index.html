@@ -28,6 +28,9 @@ input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-r
 .loading{display:flex;flex-direction:column;gap:8px;margin:auto 0;align-items:center;color:var(--muted)}
 .bar{width:min(320px,80%);height:8px;background:var(--line);border-radius:99px;overflow:hidden}
 .bar div{height:100%;width:0;background:var(--accent);transition:width .2s}
+.teach{display:flex;flex-direction:column;gap:6px;margin-top:8px;white-space:normal}
+.teach small{color:var(--muted);font-size:12px}
+.teach input{padding:7px 9px;font-size:14px}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
 </head>
@@ -45,12 +48,15 @@ input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-r
     <button class="send" id="send" disabled>Send</button>
   </form>
 </div>
+<script src="config.js?v=3"></script>
 <script>
+const CONF = window.NOVA_CONFIG || {};
+const CAN_TEACH = !!(CONF.SUPABASE_URL && CONF.SUPABASE_ANON_KEY);
 const log = document.getElementById('log'), input = document.getElementById('i'), send = document.getElementById('send');
-const VERSION = 2; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
+const VERSION = 3; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
 const worker = new Worker('nova-worker.js?v=' + VERSION);
 const INTRO = "Hi! I'm Nova, a small model trained from scratch. Ask me about everyday things, animals, countries, science, or how to build web pages in HTML.";
-let busy = false, current = null;
+let busy = false, current = null, lastQuestion = '';
 
 function fill(d, t) {
   d.textContent = '';
@@ -75,6 +81,38 @@ function add(t, c) {
 }
 function setBusy(b) { busy = b; send.disabled = b; }
 
+// "Teach Nova": send a better answer to the trainer's database. Only sent when the visitor clicks Send.
+function teachUI(d, question) {
+  if (!CAN_TEACH) return;
+  const open = document.createElement('button');
+  open.className = 'copy'; open.type = 'button'; open.textContent = 'Teach Nova the right answer';
+  d.append(open);
+  open.onclick = () => {
+    open.remove();
+    const box = document.createElement('div'); box.className = 'teach';
+    const note = document.createElement('small');
+    note.textContent = 'Your question and this answer will be sent to Nova\'s trainer, who may use them to train Nova. Don\'t include personal information.';
+    const ta = document.createElement('input');
+    ta.placeholder = 'What should Nova have said?'; ta.maxLength = 300; ta.setAttribute('aria-label', 'Better answer');
+    const s = document.createElement('button'); s.className = 'copy'; s.type = 'button'; s.textContent = 'Send lesson';
+    box.append(note, ta, s); d.append(box); ta.focus();
+    s.onclick = async () => {
+      const answer = ta.value.trim();
+      if (!answer) return;
+      s.disabled = true; s.textContent = 'Sending…';
+      try {
+        const r = await fetch(CONF.SUPABASE_URL.replace(/\/$/, '') + '/rest/v1/lessons', {
+          method: 'POST',
+          headers: { apikey: CONF.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + CONF.SUPABASE_ANON_KEY,
+                     'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ question: question.slice(0, 300), answer: answer.slice(0, 300) }),
+        });
+        box.textContent = r.ok ? 'Thanks! Nova\'s trainer will review your lesson.' : 'Could not send the lesson. Try again later.';
+      } catch { box.textContent = 'Could not send the lesson. Check your connection.'; }
+    };
+  };
+}
+
 worker.onmessage = (e) => {
   const m = e.data;
   if (m.type === 'progress') document.getElementById('bar').style.width = (m.value * 100).toFixed(0) + '%';
@@ -83,7 +121,7 @@ worker.onmessage = (e) => {
     add(INTRO, 'b');
     input.disabled = false; send.disabled = false; input.placeholder = 'Message Nova…'; input.focus();
   } else if (m.type === 'token' && current) { fill(current, m.text); current.classList.remove('thinking'); log.scrollTop = log.scrollHeight; }
-  else if (m.type === 'done' && current) { fill(current, m.text); current.classList.remove('thinking'); current = null; setBusy(false); log.scrollTop = log.scrollHeight; input.focus(); }
+  else if (m.type === 'done' && current) { fill(current, m.text); current.classList.remove('thinking'); teachUI(current, lastQuestion); current = null; setBusy(false); log.scrollTop = log.scrollHeight; input.focus(); }
   else if (m.type === 'error') {
     if (current) { current.textContent = 'Something went wrong: ' + m.message; current = null; setBusy(false); }
     else document.getElementById('loading').textContent = 'Could not load Nova: ' + m.message;
@@ -96,6 +134,7 @@ document.getElementById('f').onsubmit = (e) => {
   const text = input.value.trim();
   if (!text || busy) return;
   input.value = '';
+  lastQuestion = text;
   add(text, 'u');
   current = add('Thinking…', 'b'); current.classList.add('thinking');
   setBusy(true);
