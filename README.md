@@ -20,6 +20,9 @@ Every so often, Nova goes through a learning round:
 - Animals, countries and capitals, and basic science.
 - HTML and CSS: what tags do, plus example code for buttons, links, lists, tables, forms and pages.
 - Jokes, small talk, and remembering your name during a chat.
+- **Word meanings.** Ask "what does curious mean?" or "define mice". These answers aren't generated: Nova looks the word up in the [WordNet](https://wordnet.princeton.edu) dictionary, so they're exact. WordNet 3.0 Copyright 2006 by Princeton University. All rights reserved. See `WORDNET_LICENSE.txt`.
+
+When a message is too unfamiliar, Nova says it doesn't understand instead of guessing.
 
 Nova is small, so it only knows what it was trained on. Questions outside those topics may get a confident-sounding guess.
 
@@ -31,6 +34,8 @@ Nova is small, so it only knows what it was trained on. Questions outside those 
 | `nova-worker.js` | The model, written in JavaScript (runs in a background thread) |
 | `model.bin` | The trained weights (float16, 20 MB) |
 | `model.json` | Model settings, vocabulary, and where each weight is in `model.bin` |
+| `dictionary.json` | The WordNet dictionary, about 145,000 words and phrases. It's loaded only when you ask what a word means |
+| `WORDNET_LICENSE.txt` | WordNet's license and copyright notice |
 | `config.js` | Where Teach lessons are sent (a Supabase URL and its public key). If it's empty, the Teach button is hidden |
 
 ## Run it locally
