@@ -229,6 +229,107 @@ async function lookupFallback(message) {
   return base ? describe(r[1], base, d) : null;
 }
 
+// ---------- web search (Wikipedia; same rules as mymodel/websearch.py) ----------
+// Nova is too small to read a page and rewrite it, so it quotes the sentences that best match the question.
+const WIKIS = ["https://simple.wikipedia.org", "https://en.wikipedia.org"];
+const SEARCH_CMD = /^(?:hey |so |please |pls |can you |could you |nova,? )*(?:search|look up|lookup|google|find)(?: the web| online| the internet| wikipedia| on wikipedia| on the web)?(?: for| about| up)?\s+(.+)$/i;
+const QUESTION = /^(?:hey |so |um |please |pls |do you know |can you tell me |tell me )?(?:who|what|whats|what's|when|where|which|why|how|tell me about|explain|is|are|was|were|did|does)\b/i;
+const MAKE = /\b(?:make|build|create|write|code|draw|design|program)\b/i;
+const WANTS = [ // what kind of number an answer needs, so the sentence that has one wins
+  [/^(?:when|what year|in what year)\b/i, /\b(?:1\d{3}|20\d{2})\b/],
+  [/^how (?:many|much)\b/i, /\d[\d,.]*\d|\b\d+\b|\b(?:hundred|thousand|million|billion)\b/i],
+  [/^how (?:big|tall|long|far|deep|high|heavy|wide|fast)\b/i,
+   /\d[\d,.]*\s*(?:m|km|cm|metres?|meters?|kilometres?|kilometers?|feet|ft|miles?|kg|tonnes?|tons|km\/h|mph)\b/i],
+  [/^how old\b/i, /\b\d[\d,.]*\s*(?:years?|million|billion)\b|\b(?:1\d{3}|20\d{2})\b/i],
+];
+const STOP = new Set(`a an the of in on at to for from by with and or is are was were be been being do does did
+how many much what whats what's who whom whose when where which why there their they them it its this that
+these those me my i you your u ur we our can could would should will shall may might please pls tell about
+know explain define search look up lookup google find web online internet wikipedia hey so um any some
+big old tall long far fast heavy deep high year much like have has had`.split(/\s+/));
+const IRREGULAR = { sank: "sink", sunk: "sink", began: "begin", begun: "begin", built: "build", made: "make",
+  won: "win", wrote: "write", written: "write", ran: "run", flew: "fly", flown: "fly", grew: "grow", grown: "grow",
+  ate: "eat", eaten: "eat", found: "find", fought: "fight", taught: "teach", bought: "buy", thought: "think",
+  born: "bear", died: "die", dies: "die", lived: "live", lives: "live", people: "person", children: "child",
+  mice: "mouse", feet: "foot", teeth: "tooth", geese: "goose", men: "man", women: "woman" };
+
+function searchCommand(message) {
+  const r = message.trim().replace(/[?.! ]+$/, "").match(SEARCH_CMD);
+  return r ? r[1] : null;
+}
+function isFactQuestion(message) { const m = message.trim(); return QUESTION.test(m) && !MAKE.test(m); }
+const words = (t) => t.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+const keywords = (t) => words(t).filter((w) => !STOP.has(w) && w.length > 1);
+function stem(w) {
+  if (IRREGULAR[w]) return IRREGULAR[w];
+  for (const suf of ["ies", "ing", "es", "ed", "s"]) if (w.endsWith(suf) && w.length > suf.length + 2) return w.slice(0, -suf.length);
+  return w;
+}
+const stemsOf = (t) => new Set(words(t).map(stem));
+
+async function wikiApi(wiki, params) {
+  const r = await fetch(`${wiki}/w/api.php?` + new URLSearchParams({ ...params, format: "json", origin: "*" }));
+  if (!r.ok) throw new Error(`Wikipedia said ${r.status}`);
+  return r.json();
+}
+
+// Search, then take the first result whose whole title is in the question (Moon, not "Earth phase").
+// If none fits, try the article named after the question's first keyword (Cat, not "Schrödinger's cat").
+async function findPage(wiki, kw) {
+  const hits = (await wikiApi(wiki, { action: "query", list: "search", srsearch: kw.join(" "), srlimit: 10 })).query.search;
+  if (!hits.length) return null;
+  const want = new Set(kw.map(stem));
+  const fit = hits.find((h) => [...stemsOf(h.title)].every((s) => want.has(s) || STOP.has(s)));
+  const titles = fit ? [fit.title] : [kw[0].charAt(0).toUpperCase() + kw[0].slice(1), hits[0].title];
+  for (const title of titles) {
+    const pages = (await wikiApi(wiki, { action: "query", prop: "extracts|info", titles: title, explaintext: 1,
+      exsectionformat: "plain", inprop: "url", redirects: 1 })).query.pages;
+    const page = Object.values(pages)[0];
+    if (page && !("missing" in page) && page.extract) return page;
+  }
+  return null;
+}
+
+function bestSentences(question, page, kw) {
+  const text = (page.extract || "").replace(/'''/g, "")
+    .split(/\n(?:References|See also|Notes|Sources|Other websites|External links)\n/)[0];
+  const sents = text.split(/(?<=[.!?])\s+(?=[A-Z0-9"(])|(?<=[a-z][.!?])(?=[A-Z])|\n+/).map((s) => s.trim())
+    .filter((s) => s.length > 25 && s.length < 400 && /[.!?]$/.test(s)).slice(0, 150);
+  if (!sents.length) return [];
+  const stems = new Set(kw.map(stem));
+  const q = question.trim().replace(/^(?:hey |so |um |please |pls |do you know |can you tell me |tell me )+/i, "");
+  const want = (WANTS.find(([ask]) => ask.test(q)) || [])[1];
+  const score = (i) => {
+    let n = 0; for (const s of stemsOf(sents[i])) if (stems.has(s)) n++;
+    return n + (want && want.test(sents[i]) ? 3 : 0) - i * 0.01; // earlier wins ties
+  };
+  const about = new Set([...stemsOf(page.title), ...stemsOf(sents[0])]);
+  if (![...stems].some((s) => about.has(s))) return []; // the page isn't about what was asked
+  let best = 0; for (let i = 1; i < sents.length; i++) if (score(i) > score(best)) best = i;
+  if (best === 0 || (!want && score(best) < score(0) + 1))
+    return sents[0].length < 120 && sents.length > 1 ? sents.slice(0, 2) : sents.slice(0, 1);
+  return [sents[0], sents[best]];
+}
+
+// Nova's answer with its source, or null if nothing useful was found (or the visitor is offline).
+async function webSearch(question) {
+  const kw = keywords(question).slice(0, 8);
+  if (!kw.length) return null;
+  for (const wiki of WIKIS) {
+    let page;
+    try { page = await findPage(wiki, kw); } catch { continue; }
+    if (!page) continue;
+    const sents = bestSentences(question, page, kw);
+    if (!sents.length) continue;
+    let answer = sents.join(" ");
+    if (answer.length > 600) answer = answer.slice(0, 600).replace(/\s+\S*$/, "") + "...";
+    return `I searched Wikipedia and found this:\n\n${answer}\n\nSource: ${page.title}, ${page.fullurl}`;
+  }
+  return null;
+}
+
+const NOT_FOUND = "I searched Wikipedia but couldn't find a good answer to that. Could you try different words?";
+
 const CONFUSED ="I'm not sure I understand that. I'm a small model, so I only know about everyday things, " +
   "animals, countries, science, word meanings and basic HTML. Could you ask it a different way?";
 
@@ -261,6 +362,9 @@ async function reply(message, temperature) {
   // Word definitions come straight from the dictionary, not from the model's memory.
   const word = definitionRequest(message);
   if (word) return await lookup(word);
+  // "search for X", "look up X": go straight to the web.
+  const topic = searchCommand(message);
+  if (topic) { postMessage({ type: "token", text: "Searching Wikipedia…" }); return (await webSearch(topic)) || NOT_FOUND; }
 
   const startPos = pos, startLen = ctx.length;
   const text300 = message.slice(0, 300);
@@ -278,8 +382,13 @@ async function reply(message, temperature) {
     (word_threshold && worstWord(text300, charScores) > word_threshold));
   if (unfamiliar) {
     // Too unfamiliar to answer: forget this message (when the window didn't slide), then
-    // try the dictionary in case it's just a word, otherwise say so.
+    // search the web if it's a question, then try the dictionary in case it's just a word, otherwise say so.
     if (ctx.length === startLen + 1 + n) { pos = startPos; ctx.length = startLen; }
+    if (isFactQuestion(message)) {
+      postMessage({ type: "token", text: "Searching Wikipedia…" });
+      const found = await webSearch(message);
+      if (found) return found;
+    }
     return (await lookupFallback(message)) || CONFUSED;
   }
   logits = feed(stoi.get(BOT));
@@ -305,6 +414,9 @@ onmessage = async (e) => {
     else if (msg.type === "chat") {
       const text = await reply(msg.text, msg.temperature ?? 0.5);
       postMessage({ type: "done", text });
+    } else if (msg.type === "search") { // the "Search the web" button under an answer
+      const text = (await webSearch(searchCommand(msg.text) || msg.text)) || NOT_FOUND;
+      postMessage({ type: "done", text, searched: true });
     }
   } catch (err) {
     postMessage({ type: "error", message: String(err && err.message || err) });

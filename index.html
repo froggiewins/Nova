@@ -19,7 +19,8 @@ h1{margin:0;font-size:1.15rem}small{color:var(--muted)}button{font:inherit;curso
 .b{align-self:flex-start;background:var(--card);border:1px solid var(--line);border-bottom-left-radius:4px}
 .thinking{color:var(--muted);font-style:italic}
 pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;margin:6px 0;overflow-x:auto;white-space:pre;font:13px/1.45 Consolas,ui-monospace,monospace}
-.copy{display:block;margin-top:4px;font-size:12px;background:none;border:1px solid var(--line);border-radius:6px;color:var(--muted);padding:2px 8px}
+a{color:var(--accent)}
+.copy{display:inline-block;margin:4px 6px 0 0;font-size:12px;background:none;border:1px solid var(--line);border-radius:6px;color:var(--muted);padding:2px 8px}
 form{display:flex;gap:8px;padding:12px 0 16px;border-top:1px solid var(--line)}
 input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);font:inherit}
 .send{background:var(--accent);color:var(--accent-ink);border:0;border-radius:10px;padding:0 18px;font-weight:600}
@@ -48,14 +49,14 @@ input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-r
     <button class="send" id="send" disabled>Send</button>
   </form>
 </div>
-<script src="config.js?v=6"></script>
+<script src="config.js?v=7"></script>
 <script>
 const CONF = window.NOVA_CONFIG || {};
 const CAN_TEACH = !!(CONF.SUPABASE_URL && CONF.SUPABASE_ANON_KEY);
 const log = document.getElementById('log'), input = document.getElementById('i'), send = document.getElementById('send');
-const VERSION = 6; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
+const VERSION = 7; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
 const worker = new Worker('nova-worker.js?v=' + VERSION);
-const INTRO = "Hi! I'm Nova, a small model trained from scratch. Ask me about everyday things, animals, countries, science, or how to build web pages in HTML. I can also look up any word: try \"what does curious mean?\"";
+const INTRO = "Hi! I'm Nova, a small model trained from scratch. Ask me about everyday things, animals, countries, science, or how to build web pages in HTML. I can also look up any word (try \"what does curious mean?\") and search Wikipedia (try \"search for kiwi bird\"). When I search, your question is sent to Wikipedia.";
 let busy = false, current = null, lastQuestion = '';
 
 function fill(d, t) {
@@ -69,7 +70,14 @@ function fill(d, t) {
       b.onclick = () => navigator.clipboard.writeText(pre.textContent).then(() => b.textContent = 'Copied', () => {});
       d.append(pre, b);
     } else if (part.trim()) {
-      d.append(document.createTextNode(part.replace(/^\n|\n$/g, '')));
+      // plain text, with web addresses made clickable (like the Source of a search answer)
+      part.replace(/^\n|\n$/g, '').split(/(https:\/\/[^\s]+)/).forEach((bit, j) => {
+        if (j % 2) {
+          const a = document.createElement('a');
+          a.href = bit; a.textContent = bit; a.target = '_blank'; a.rel = 'noopener noreferrer';
+          d.append(a);
+        } else if (bit) d.append(document.createTextNode(bit));
+      });
     }
   });
 }
@@ -80,6 +88,20 @@ function add(t, c) {
   return d;
 }
 function setBusy(b) { busy = b; send.disabled = b; }
+
+// "Search the web" under each of Nova's own answers, for when it gets something wrong.
+function searchUI(d, question) {
+  const b = document.createElement('button');
+  b.className = 'copy'; b.type = 'button'; b.textContent = 'Search the web for this';
+  d.append(b);
+  b.onclick = () => {
+    if (busy) return;
+    b.remove();
+    current = add('Searching Wikipedia…', 'b'); current.classList.add('thinking');
+    setBusy(true);
+    worker.postMessage({ type: 'search', text: question });
+  };
+}
 
 // "Teach Nova": send a better answer to the trainer's database. Only sent when the visitor clicks Send.
 function teachUI(d, question) {
@@ -121,7 +143,9 @@ worker.onmessage = (e) => {
     add(INTRO, 'b');
     input.disabled = false; send.disabled = false; input.placeholder = 'Message Nova…'; input.focus();
   } else if (m.type === 'token' && current) { fill(current, m.text); current.classList.remove('thinking'); log.scrollTop = log.scrollHeight; }
-  else if (m.type === 'done' && current) { fill(current, m.text); current.classList.remove('thinking'); teachUI(current, lastQuestion); current = null; setBusy(false); log.scrollTop = log.scrollHeight; input.focus(); }
+  else if (m.type === 'done' && current) { fill(current, m.text); current.classList.remove('thinking'); if (!m.searched && !m.text.startsWith('I searched Wikipedia') &&
+        !/\b(?:make|build|create|write|code|draw|design|program)\b/i.test(lastQuestion)) searchUI(current, lastQuestion);
+    teachUI(current, lastQuestion); current = null; setBusy(false); log.scrollTop = log.scrollHeight; input.focus(); }
   else if (m.type === 'error') {
     if (current) { current.textContent = 'Something went wrong: ' + m.message; current = null; setBusy(false); }
     else document.getElementById('loading').textContent = 'Could not load Nova: ' + m.message;
