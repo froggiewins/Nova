@@ -8,7 +8,8 @@ let P = {};               // weights by name (Float32Array)
 let kCache, vCache;       // per layer: Float32Array(T * E)
 let pos = 0;              // next position in the cache
 let ctx = [];             // tokens currently in the cache
-let meta_threshold = 0;   // surprise level above which Nova says it doesn't understand
+let meta_threshold = 0;   // average surprise above which Nova says it doesn't understand
+let word_threshold = 0;   // same, for the single most unfamiliar word
 
 // ---------- loading ----------
 function halfTable() {
@@ -61,6 +62,7 @@ async function load() {
   }
   cfg = meta.config; chars = meta.chars;
   meta_threshold = meta.surprise_threshold || 0;
+  word_threshold = meta.word_surprise_threshold || 0;
   stoi = new Map(chars.map((c, i) => [c, i]));
   E = cfg.n_embd; H = cfg.n_head; HD = E / H; L = cfg.n_layer; T = cfg.block_size; V = cfg.vocab_size;
   END_ID = stoi.get(END);
@@ -237,20 +239,47 @@ function surpriseOf(logits, id) {
   return Math.log(s) + mx - logits[id];
 }
 
+// After these phrases comes the person's own content (a name, a button label, a link...).
+// Nova can't have seen it before, so it doesn't count as "not understanding". Same rule as surprise.py.
+const FREE_TEXT = /\b(?:my name is|name's|i'm|im|i am|call me|says|saying|called|named|that reads|with the text|link to|links to|list of|title)\b/i;
+
+// Average surprise of each word (3+ letters) before any free-text part of the message.
+function worstWord(message, charScores) {
+  const m = FREE_TEXT.exec(message);
+  const cut = m ? m.index + m[0].length : message.length;
+  let worst = 0;
+  for (const w of message.slice(0, cut).matchAll(/\S+/g)) {
+    const word = w[0];
+    if (word.replace(/[^A-Za-z]/g, "").length < 3 || /[0-9./@:]/.test(word)) continue;
+    const seg = charScores.slice(w.index, w.index + word.length).filter((s) => s !== null);
+    if (seg.length) worst = Math.max(worst, seg.reduce((a, b) => a + b, 0) / seg.length);
+  }
+  return worst;
+}
+
 async function reply(message, temperature) {
   // Word definitions come straight from the dictionary, not from the model's memory.
   const word = definitionRequest(message);
   if (word) return await lookup(word);
 
   const startPos = pos, startLen = ctx.length;
-  const msgIds = [...message.slice(0, 300)].map((c) => stoi.get(c)).filter((id) => id !== undefined);
+  const text300 = message.slice(0, 300);
+  const charScores = new Array(text300.length).fill(null);
   let logits = feed(stoi.get(USER)), total = 0, n = 0;
-  for (const id of msgIds) { total += surpriseOf(logits, id); n++; logits = feed(id); }
-  const threshold = meta_threshold;
-  if (threshold && n >= 3 && total / n > threshold) {
+  for (let i = 0; i < text300.length; i++) {
+    const id = stoi.get(text300[i]);
+    if (id === undefined) continue;
+    const s = surpriseOf(logits, id);
+    charScores[i] = s; total += s; n++;
+    logits = feed(id);
+  }
+  const unfamiliar = message.trim().length >= 3 && n > 0 && (
+    (meta_threshold && total / n > meta_threshold) ||
+    (word_threshold && worstWord(text300, charScores) > word_threshold));
+  if (unfamiliar) {
     // Too unfamiliar to answer: forget this message (when the window didn't slide), then
     // try the dictionary in case it's just a word, otherwise say so.
-    if (ctx.length === startLen + 1 + msgIds.length) { pos = startPos; ctx.length = startLen; }
+    if (ctx.length === startLen + 1 + n) { pos = startPos; ctx.length = startLen; }
     return (await lookupFallback(message)) || CONFUSED;
   }
   logits = feed(stoi.get(BOT));
