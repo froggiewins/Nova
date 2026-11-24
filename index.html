@@ -49,12 +49,12 @@ input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-r
     <button class="send" id="send" disabled>Send</button>
   </form>
 </div>
-<script src="config.js?v=8"></script>
+<script src="config.js?v=9"></script>
 <script>
 const CONF = window.NOVA_CONFIG || {};
 const CAN_TEACH = !!(CONF.SUPABASE_URL && CONF.SUPABASE_ANON_KEY);
 const log = document.getElementById('log'), input = document.getElementById('i'), send = document.getElementById('send');
-const VERSION = 8; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
+const VERSION = 9; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
 const worker = new Worker('nova-worker.js?v=' + VERSION);
 const INTRO = "Hi! I'm Nova, a small model trained from scratch. Ask me about everyday things, animals, countries, science, or how to build web pages in HTML. I can also look up any word (try \"what does curious mean?\"). When I don't know something, I search Wikipedia and learn from what I find (or say \"search for kiwi bird\"). When I search, your question is sent to Wikipedia, and the title of the article I found is saved so I can study it later.";
 let busy = false, current = null, lastQuestion = '';
