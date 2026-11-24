@@ -49,14 +49,14 @@ input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-r
     <button class="send" id="send" disabled>Send</button>
   </form>
 </div>
-<script src="config.js?v=7"></script>
+<script src="config.js?v=8"></script>
 <script>
 const CONF = window.NOVA_CONFIG || {};
 const CAN_TEACH = !!(CONF.SUPABASE_URL && CONF.SUPABASE_ANON_KEY);
 const log = document.getElementById('log'), input = document.getElementById('i'), send = document.getElementById('send');
-const VERSION = 7; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
+const VERSION = 8; // bump this when you update nova-worker.js or the model, so browsers fetch the new files
 const worker = new Worker('nova-worker.js?v=' + VERSION);
-const INTRO = "Hi! I'm Nova, a small model trained from scratch. Ask me about everyday things, animals, countries, science, or how to build web pages in HTML. I can also look up any word (try \"what does curious mean?\") and search Wikipedia (try \"search for kiwi bird\"). When I search, your question is sent to Wikipedia.";
+const INTRO = "Hi! I'm Nova, a small model trained from scratch. Ask me about everyday things, animals, countries, science, or how to build web pages in HTML. I can also look up any word (try \"what does curious mean?\"). When I don't know something, I search Wikipedia and learn from what I find (or say \"search for kiwi bird\"). When I search, your question is sent to Wikipedia, and the title of the article I found is saved so I can study it later.";
 let busy = false, current = null, lastQuestion = '';
 
 function fill(d, t) {
@@ -89,18 +89,18 @@ function add(t, c) {
 }
 function setBusy(b) { busy = b; send.disabled = b; }
 
-// "Search the web" under each of Nova's own answers, for when it gets something wrong.
-function searchUI(d, question) {
-  const b = document.createElement('button');
-  b.className = 'copy'; b.type = 'button'; b.textContent = 'Search the web for this';
-  d.append(b);
-  b.onclick = () => {
-    if (busy) return;
-    b.remove();
-    current = add('Searching Wikipedia…', 'b'); current.classList.add('thinking');
-    setBusy(true);
-    worker.postMessage({ type: 'search', text: question });
-  };
+// Saving to the trainer's database. New Supabase keys (sb_publishable_...) go only in the apikey header.
+function saveRow(table, row) {
+  const key = CONF.SUPABASE_ANON_KEY;
+  const headers = { apikey: key, 'Content-Type': 'application/json', Prefer: 'return=minimal' };
+  if (!key.startsWith('sb_')) headers.Authorization = 'Bearer ' + key;
+  return fetch(CONF.SUPABASE_URL.replace(/\/$/, '') + '/rest/v1/' + table, { method: 'POST', headers, body: JSON.stringify(row) });
+}
+
+// When Nova finds a Wikipedia article, its title (never the visitor's question) is saved,
+// so Nova can learn that article in his next nightly training.
+function rememberFound(title, wiki) {
+  if (CAN_TEACH) saveRow('found', { title: title.slice(0, 200), wiki }).catch(() => {});
 }
 
 // "Teach Nova": send a better answer to the trainer's database. Only sent when the visitor clicks Send.
@@ -123,12 +123,7 @@ function teachUI(d, question) {
       if (!answer) return;
       s.disabled = true; s.textContent = 'Sending…';
       try {
-        const r = await fetch(CONF.SUPABASE_URL.replace(/\/$/, '') + '/rest/v1/lessons', {
-          method: 'POST',
-          headers: { apikey: CONF.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + CONF.SUPABASE_ANON_KEY,
-                     'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ question: question.slice(0, 300), answer: answer.slice(0, 300) }),
-        });
+        const r = await saveRow('lessons', { question: question.slice(0, 300), answer: answer.slice(0, 300) });
         box.textContent = r.ok ? 'Thanks! Nova\'s trainer will review your lesson.' : 'Could not send the lesson. Try again later.';
       } catch { box.textContent = 'Could not send the lesson. Check your connection.'; }
     };
@@ -143,9 +138,9 @@ worker.onmessage = (e) => {
     add(INTRO, 'b');
     input.disabled = false; send.disabled = false; input.placeholder = 'Message Nova…'; input.focus();
   } else if (m.type === 'token' && current) { fill(current, m.text); current.classList.remove('thinking'); log.scrollTop = log.scrollHeight; }
-  else if (m.type === 'done' && current) { fill(current, m.text); current.classList.remove('thinking'); if (!m.searched && !m.text.startsWith('I searched Wikipedia') &&
-        !/\b(?:make|build|create|write|code|draw|design|program)\b/i.test(lastQuestion)) searchUI(current, lastQuestion);
+  else if (m.type === 'done' && current) { fill(current, m.text); current.classList.remove('thinking');
     teachUI(current, lastQuestion); current = null; setBusy(false); log.scrollTop = log.scrollHeight; input.focus(); }
+  else if (m.type === 'found') rememberFound(m.title, m.wiki);
   else if (m.type === 'error') {
     if (current) { current.textContent = 'Something went wrong: ' + m.message; current = null; setBusy(false); }
     else document.getElementById('loading').textContent = 'Could not load Nova: ' + m.message;

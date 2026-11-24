@@ -21,7 +21,7 @@ Every so often, Nova goes through a learning round:
 - HTML and CSS: what tags do, plus example code for buttons, links, lists, tables, forms and pages.
 - Jokes, small talk, and remembering your name during a chat.
 - **Word meanings.** Ask "what does curious mean?" or "define mice". These answers aren't generated: Nova looks the word up in the [WordNet](https://wordnet.princeton.edu) dictionary, so they're exact. WordNet 3.0 Copyright 2006 by Princeton University. All rights reserved. See `WORDNET_LICENSE.txt`.
-- **Web search.** Say "search for kiwi bird", or press "Search the web for this" under an answer. Nova searches Wikipedia (Simple English first, then English) and quotes the sentences that best match your question, with a link to the article. Nova also searches by itself when a question is too unfamiliar to answer. When it searches, your question is sent to Wikipedia. Wikipedia text is licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
+- **Web search, and learning from it.** When a question is too unfamiliar, or you say "search for kiwi bird", Nova searches Wikipedia (Simple English first, then English), reads the sentences that best match your question, and writes his reply from them, with a link to the article. The title of the article he found is saved, and every night Nova trains on the articles he found, so next time he may know the answer without searching. When Nova searches, your question is sent to Wikipedia; only the article title is saved, never your question. Wikipedia text is licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 
 When a message is too unfamiliar and a search doesn't help, Nova says it doesn't understand instead of guessing.
 

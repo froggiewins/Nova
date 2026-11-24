@@ -221,6 +221,7 @@ async function lookup(word) {
 
 // For a message Nova didn't understand: is it just a word, or "what is a X"?
 async function lookupFallback(message) {
+  if (/!\s*$/.test(message)) return null; // "ground beef!" is an exclamation, not a question about a word
   const m = message.toLowerCase().trim().replace(/[?.!]+$/, "");
   const r = m.match(/^(?:what(?:'s| is| are)\s+)?(?:a |an |the )?([a-z][a-z' -]{1,30})$/);
   if (!r || r[1].split(" ").length > 3) return null;
@@ -257,7 +258,15 @@ function searchCommand(message) {
   const r = message.trim().replace(/[?.! ]+$/, "").match(SEARCH_CMD);
   return r ? r[1] : null;
 }
-function isFactQuestion(message) { const m = message.trim(); return QUESTION.test(m) && !MAKE.test(m); }
+// Questions about Nova or the person ("are you stupid?", "what's my name?") are never searched.
+const POLITE = /^(?:hey |so |um |please |pls |nova,? )*(?:do you know(?: about| what| who| when| where| how| why| if)?|can you tell me(?: about)?|could you tell me(?: about)?|tell me(?: about)?|can you explain|i want to know|i wonder)\s+/i;
+const NEEDS_FACT = /^(?:how (?:many|much|big|tall|old|long|far|deep|high|heavy|fast|wide)|when (?:did|was|is|were|does|do)|what year|in what year|who (?:was|is|invented|discovered|wrote|made|built|painted|founded|created)|where (?:is|was|are|do|does|did))\b/i;
+const CHAT = /^(?:a |an |another |some )?(?:joke|story|riddle|poem|fun fact|something|more|again)\b/i;
+const PERSONAL = /\b(?:you|your|yours|yourself|u|ur|i|im|i'm|me|my|mine|myself|we|us|our)\b/i;
+function isFactQuestion(message) {
+  const m = message.trim(), rest = m.replace(POLITE, "");
+  return (rest !== m || QUESTION.test(m)) && !MAKE.test(m) && !PERSONAL.test(rest) && !CHAT.test(rest);
+}
 const words = (t) => t.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
 const keywords = (t) => words(t).filter((w) => !STOP.has(w) && w.length > 1);
 function stem(w) {
@@ -306,12 +315,12 @@ function bestSentences(question, page, kw) {
   const about = new Set([...stemsOf(page.title), ...stemsOf(sents[0])]);
   if (![...stems].some((s) => about.has(s))) return []; // the page isn't about what was asked
   let best = 0; for (let i = 1; i < sents.length; i++) if (score(i) > score(best)) best = i;
-  if (best === 0 || (!want && score(best) < score(0) + 1))
-    return sents[0].length < 120 && sents.length > 1 ? sents.slice(0, 2) : sents.slice(0, 1);
-  return [sents[0], sents[best]];
+  if (best === 0 || (!want && score(best) < score(0) + 1)) return sents.slice(0, 2);
+  return [sents[best], sents[0]]; // most useful first: it's kept if both don't fit
 }
 
-// Nova's answer with its source, or null if nothing useful was found (or the visitor is offline).
+// The best sentences for the question and where they came from, or null if nothing useful
+// was found (or the visitor is offline).
 async function webSearch(question) {
   const kw = keywords(question).slice(0, 8);
   if (!kw.length) return null;
@@ -320,15 +329,72 @@ async function webSearch(question) {
     try { page = await findPage(wiki, kw); } catch { continue; }
     if (!page) continue;
     const sents = bestSentences(question, page, kw);
-    if (!sents.length) continue;
-    let answer = sents.join(" ");
-    if (answer.length > 600) answer = answer.slice(0, 600).replace(/\s+\S*$/, "") + "...";
-    return `I searched Wikipedia and found this:\n\n${answer}\n\nSource: ${page.title}, ${page.fullurl}`;
+    if (sents.length) return { sentences: sents, title: page.title, url: page.fullurl, wiki: new URL(wiki).hostname.split(".")[0] };
   }
   return null;
 }
 
+// Found text as Nova can read it: only characters he knows, no (brackets), at most FOUND_LIMIT characters,
+// so the question, the found text and his reply all fit in his memory. Same rules as found_practice.py.
+const FOUND_LIMIT = 140;
+const SWAPS = { "–": "-", "—": "-", "‘": "'", "’": "'", "“": '"', "”": '"',
+  "…": "...", " ": " ", "×": "x", "°": " degrees" };
+function plain(s) {
+  for (const [a, b] of Object.entries(SWAPS)) s = s.split(a).join(b);
+  s = s.normalize("NFKD").replace(/[^\x00-\x7f]/g, "");
+  let prev; do { prev = s; s = s.replace(/\s*\([^()]*\)/g, ""); } while (s !== prev);
+  s = [...s.replace(/[[\]{}]/g, "")].filter((c) => stoi.has(c) && c >= " ").join("");
+  return s.replace(/\s+/g, " ").trim();
+}
+function foundText(sentences) {
+  let out = "";
+  for (let s of sentences) {
+    s = plain(s);
+    if (!s) continue;
+    if (out.length + s.length + 1 > FOUND_LIMIT) {
+      if (!out) out = s.slice(0, FOUND_LIMIT - 3).replace(/\s+\S*$/, "") + "...";
+      break;
+    }
+    out = (out + " " + s).trim();
+  }
+  return out;
+}
+
+// Every word Nova wrote must come from what he found or the question, so he can't make facts up.
+const OWN_WORDS = new Set(["looked", "found", "here", "what", "heres"]);
+function faithful(reply, found, question) {
+  const known = new Set([...words(found), ...words(question)].map(stem));
+  return words(reply).every((w) => w.length < 3 || OWN_WORDS.has(w) || known.has(stem(w)));
+}
+
 const NOT_FOUND = "I searched Wikipedia but couldn't find a good answer to that. Could you try different words?";
+
+// Search, then Nova writes the reply himself from what he found. The found text stays in
+// the chat, so he can use it for follow-up questions too. Returns null if nothing was found.
+async function searchAndAnswer(message, query, temperature) {
+  postMessage({ type: "token", text: "Searching Wikipedia…" });
+  const hit = await webSearch(query);
+  const found = hit && foundText(hit.sentences);
+  if (!found || found.length < 15) return null;
+  postMessage({ type: "found", title: hit.title, wiki: hit.wiki }); // so Nova can learn this article later
+  postMessage({ type: "token", text: "Reading what I found…" });
+  let logits = feed(stoi.get(USER));
+  for (const c of message.slice(0, 120) + "\n{" + found + "}") if (stoi.has(c)) logits = feed(stoi.get(c));
+  logits = feed(stoi.get(BOT));
+  const before = { pos, len: ctx.length };
+  let text = generate(logits, Math.min(temperature, 0.3));
+  if (!faithful(text, found, message)) {
+    // Nova added something that isn't in what he found: say the found text instead, and
+    // remember that (not his version) for follow-up questions, if the window didn't slide.
+    text = "I looked it up! " + found;
+    if (ctx.length >= before.len && ctx.length - before.len === pos - before.pos) {
+      pos = before.pos; ctx.length = before.len;
+      for (const c of text) if (stoi.has(c)) feed(stoi.get(c));
+      feed(END_ID);
+    }
+  }
+  return text + `\n\nSource: ${hit.title}, ${hit.url}`;
+}
 
 const CONFUSED ="I'm not sure I understand that. I'm a small model, so I only know about everyday things, " +
   "animals, countries, science, word meanings and basic HTML. Could you ask it a different way?";
@@ -358,13 +424,43 @@ function worstWord(message, charScores) {
   return worst;
 }
 
+// Jokes told by the person (practice in mymodel/joke_practice.py)
+const JOKE_START = /^(?:(?:ok|so|hey|i have a joke!?|here'?s a joke:?|joke time!?)\s+)*(?:what do you call|what do you get (?:when|if)|why did the|why do |why does |why don'?t|why can'?t|why are |why was the|why is the|how do you make|how does a|what'?s the difference between|whats the difference between|what did (?:the|one)|what has |what kind of|where do .+ go|what is a .+'s favou?rite|knock,? ?knock)/i;
+const ASKS_PUNCHLINE = /(?:what|why|how|where|who)\?\s*$|who's there\?\s*$/i;
+let awaitingPunchline = false, jokeTurn = false;
+
 async function reply(message, temperature) {
+  jokeTurn = false;
+  const text = await replyInner(message, temperature);
+  if (!jokeTurn) awaitingPunchline = false; // any other reply ends the joke
+  return text;
+}
+
+async function replyInner(message, temperature) {
   // Word definitions come straight from the dictionary, not from the model's memory.
   const word = definitionRequest(message);
   if (word) return await lookup(word);
   // "search for X", "look up X": go straight to the web.
   const topic = searchCommand(message);
-  if (topic) { postMessage({ type: "token", text: "Searching Wikipedia…" }); return (await webSearch(topic)) || NOT_FOUND; }
+  if (topic) return (await searchAndAnswer(message, topic, temperature)) || NOT_FOUND;
+
+  // The person is telling a joke ("what do you call a cow with no legs?", "knock knock"), or
+  // giving the punchline Nova asked for: Nova answers himself, without the unfamiliar check.
+  // Questions that need a specific fact ("how many...", "when did...") are always searched:
+  // Nova's memory is too small for these, and he'd guess.
+  if (NEEDS_FACT.test(message.trim().replace(POLITE, "")) && isFactQuestion(message)) {
+    const answer = await searchAndAnswer(message, message, temperature);
+    if (answer) return answer;
+  }
+
+  const joking = JOKE_START.test(message.trim()) || awaitingPunchline;
+  if (joking) {
+    let logits = feed(stoi.get(USER));
+    for (const c of message.slice(0, 300)) if (stoi.has(c)) logits = feed(stoi.get(c));
+    const text = generate(feed(stoi.get(BOT)), temperature);
+    awaitingPunchline = ASKS_PUNCHLINE.test(text); jokeTurn = true;
+    return text;
+  }
 
   const startPos = pos, startLen = ctx.length;
   const text300 = message.slice(0, 300);
@@ -385,13 +481,16 @@ async function reply(message, temperature) {
     // search the web if it's a question, then try the dictionary in case it's just a word, otherwise say so.
     if (ctx.length === startLen + 1 + n) { pos = startPos; ctx.length = startLen; }
     if (isFactQuestion(message)) {
-      postMessage({ type: "token", text: "Searching Wikipedia…" });
-      const found = await webSearch(message);
-      if (found) return found;
+      const answer = await searchAndAnswer(message, message, temperature);
+      if (answer) return answer;
     }
     return (await lookupFallback(message)) || CONFUSED;
   }
-  logits = feed(stoi.get(BOT));
+  return generate(feed(stoi.get(BOT)), temperature);
+}
+
+// Nova writes a reply, one character at a time, showing it as it grows.
+function generate(logits, temperature) {
   let text = "", last = performance.now();
   for (let n = 0; n < 450; n++) {
     const id = sample(logits, temperature, 20);
@@ -410,13 +509,10 @@ onmessage = async (e) => {
   const msg = e.data;
   try {
     if (msg.type === "load") { await load(); postMessage({ type: "ready" }); }
-    else if (msg.type === "reset") { pos = 0; ctx = []; }
+    else if (msg.type === "reset") { pos = 0; ctx = []; awaitingPunchline = false; }
     else if (msg.type === "chat") {
       const text = await reply(msg.text, msg.temperature ?? 0.5);
       postMessage({ type: "done", text });
-    } else if (msg.type === "search") { // the "Search the web" button under an answer
-      const text = (await webSearch(searchCommand(msg.text) || msg.text)) || NOT_FOUND;
-      postMessage({ type: "done", text, searched: true });
     }
   } catch (err) {
     postMessage({ type: "error", message: String(err && err.message || err) });
